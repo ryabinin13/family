@@ -1,3 +1,4 @@
+import io
 import os
 import re
 
@@ -53,6 +54,7 @@ st.markdown(
 )
 
 EXCEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "план_семейного_бюджета.xlsx")
+EDITED_SHEET = "План_по_датам_отредактированный"
 
 MONTHS_RU = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля", 5: "мая", 6: "июня",
@@ -129,29 +131,60 @@ def fmt_date(d):
     return f"{d.day:02d}.{d.month:02d}.{d.year}"
 
 
-def save_sheet_to_excel(path, sheet_name, df):
+def _add_sheet(wb, sheet_name, df):
+    """Создаёт (или заменяет) лист с данными и базовым оформлением."""
+    from openpyxl.utils.dataframe import dataframe_to_rows
+    from openpyxl.styles import Font, PatternFill
+    from datetime import datetime as _dt
+
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    rows = dataframe_to_rows(df, index=False, header=True)
+    for r_idx, row in enumerate(rows, 1):
+        for c_idx, val in enumerate(row, 1):
+            if isinstance(val, pd.Timestamp):
+                val = val.to_pydatetime()
+            cell = ws.cell(row=r_idx, column=c_idx, value=val)
+            if r_idx == 1:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="4472C4")
+            elif isinstance(val, _dt):
+                cell.number_format = "DD.MM.YYYY"
+            elif isinstance(val, (int, float)):
+                cell.number_format = '#,##0" ₽"'
+    return ws
+
+
+def can_write(path):
+    """Можно ли писать рядом с файлом? В облаке файловая система только для чтения."""
+    try:
+        with open(path, "a+b"):
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def edited_workbook_bytes(path, sheet_name, df):
+    """Собирает Excel-копию с новым листом в памяти, диск не трогает."""
     try:
         wb = load_workbook(path)
-        if sheet_name in wb.sheetnames:
-            del wb[sheet_name]
-        ws = wb.create_sheet(sheet_name)
-        from openpyxl.utils.dataframe import dataframe_to_rows
-        from openpyxl.styles import Font, PatternFill
-        from datetime import datetime as _dt
+        _add_sheet(wb, sheet_name, df)
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+    except Exception as e:
+        st.error(f"Ошибка подготовки файла: {e}")
+        return None
 
-        rows = dataframe_to_rows(df, index=False, header=True)
-        for r_idx, row in enumerate(rows, 1):
-            for c_idx, val in enumerate(row, 1):
-                if isinstance(val, pd.Timestamp):
-                    val = val.to_pydatetime()
-                cell = ws.cell(row=r_idx, column=c_idx, value=val)
-                if r_idx == 1:
-                    cell.font = Font(bold=True, color="FFFFFF")
-                    cell.fill = PatternFill("solid", fgColor="4472C4")
-                elif isinstance(val, _dt):
-                    cell.number_format = "DD.MM.YYYY"
-                elif isinstance(val, (int, float)):
-                    cell.number_format = '#,##0" ₽"'
+
+def save_sheet_to_excel(path, sheet_name, df):
+    """Сохраняет лист прямо в файл. Работает только там, где есть запись."""
+    try:
+        wb = load_workbook(path)
+        _add_sheet(wb, sheet_name, df)
         wb.save(path)
         return True
     except Exception as e:
@@ -280,7 +313,11 @@ with tabs[1]:
             df_f2 = df_f2[df_f2["Статус"] == sel_status]
         df_f2 = df_f2.reset_index(drop=True)
 
-        st.info("💡 Таблицу можно редактировать прямо здесь. Затем нажмите «Сохранить изменения» — данные попадут на отдельный лист Excel.")
+        st.info(
+            "💡 Таблицу можно редактировать прямо здесь. Нажмите «Сохранить изменения»: "
+            "при локальном запуске правки допишутся в файл Excel, а в облаке (где диск только "
+            "для чтения) вы получите копию файла на скачивание."
+        )
 
         col_cfg = {}
         for c in df_f2.columns:
@@ -302,9 +339,28 @@ with tabs[1]:
         csum3.metric("Факт отложено", fmt_money(edited["Факт отложено"].sum()))
 
         if st.button("💾 Сохранить изменения", type="primary"):
-            if save_sheet_to_excel(EXCEL_FILE, "План_по_датам_отредактированный", edited):
-                st.cache_data.clear()
-                st.success("Сохранено в файл → лист «План_по_датам_отредактированный».")
+            if can_write(EXCEL_FILE):
+                if save_sheet_to_excel(EXCEL_FILE, EDITED_SHEET, edited):
+                    st.cache_data.clear()
+                    st.success(f"Сохранено в файл → лист «{EDITED_SHEET}».")
+                    st.session_state.pop("edited_xlsx", None)
+            else:
+                data = edited_workbook_bytes(EXCEL_FILE, EDITED_SHEET, edited)
+                if data is not None:
+                    st.session_state["edited_xlsx"] = data
+
+        payload = st.session_state.get("edited_xlsx")
+        if payload:
+            st.warning(
+                "Диск доступен только для чтения (это норма для облачного хостинга). "
+                "Скачайте готовый файл с листом изменений:"
+            )
+            st.download_button(
+                "⬇️ Скачать Excel с изменениями",
+                data=payload,
+                file_name="план_семейного_бюджета_изменённый.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 # ================= TAB 3: SUMMARY =================
 with tabs[2]:
@@ -343,6 +399,7 @@ with tabs[4]:
     st.write(f"**Размер:** {os.path.getsize(EXCEL_FILE) / 1024:.1f} КБ")
     st.write(f"**Листы:** {', '.join(sheetnames)}")
     st.write("Обёртка создана для удобного просмотра, редактирования и анализа семейного бюджета.")
+    st.markdown("**Запуск локально**")
     st.code("""
 # Запуск
 cd ~/code/family-budget-app
@@ -351,3 +408,9 @@ cd ~/code/family-budget-app
 # или напрямую
 streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 """)
+    st.markdown("**Запуск в облаке**")
+    st.caption(
+        "Приложение работает и на Streamlit Community Cloud. Там диск доступен только "
+        "для чтения, поэтому изменения не дописываются в исходный Excel, а скачиваются "
+        "отдельным файлом."
+    )
