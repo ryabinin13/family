@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS / редакторы
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Бэкапы Excel (создаются автоматически при сохранении)
+~$*.xlsx
